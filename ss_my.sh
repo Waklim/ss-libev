@@ -23,7 +23,7 @@ rc4-md5
 # 环境及程序版本控制
 mbedtlsver="mbedtls-2.13.0"
 mbedtlsurl="https://tls.mbed.org/download/mbedtls-2.13.0-gpl.tgz"
-initscripturl="https://raw.githubusercontent.com/teddysun/shadowsocks_install/master/shadowsocks-libev"
+initscripturl="https://raw.githubusercontent.com/waklim/ss-libev/master/ss_init.sh"
 
 # 获取环境及程序最新版本
 get_latest_version(){
