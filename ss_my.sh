@@ -1,107 +1,184 @@
 #!/usr/bin/env bash
-PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin"
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
+#===================================================================#
+#   System Required:  CentOS 6 or 7                                 #
+#   Description: Install Shadowsocks-libev server for CentOS 6 or 7 #
+#===================================================================#
 
-# 设置输出颜色
-red="\033[0;31m"
-green="\033[0;32m"
-yellow="\033[1;33m"
-plain="\033[0m"
+# Current folder
+cur_dir=`pwd`
 
-# 获取当前目录
-currentdir=$(pwd)
+libsodium_ver=$(wget --no-check-certificate -qO- https://api.github.com/repos/jedisct1/libsodium/releases/latest | grep 'tag_name' | cut -d\" -f4)
+[ -z ${libsodium_ver} ] && echo "Error: Get libsodium latest version failed" && exit 1
+libsodium_file="libsodium-$(echo ${libsodium_ver} | sed -e 's/^[a-zA-Z]//g')"
+libsodium_url="https://github.com/jedisct1/libsodium/releases/download/${libsodium_ver}/${libsodium_file}.tar.gz"
 
-# 设置加密方式数组
+mbedtls_file="mbedtls-2.13.0"
+mbedtls_url="https://tls.mbed.org/download/mbedtls-2.13.0-gpl.tgz"
+
+# Stream Ciphers
 ciphers=(
+aes-256-gcm
 aes-256-cfb
+chacha20-ietf-poly1305
 rc4-md5
 )
+# Color
+red='\033[0;31m'
+green='\033[0;32m'
+yellow='\033[1;33m'
+plain='\033[0m'
 
-# 限制以管理员身份运行
+# Make sure only root can run our script
 [[ $EUID -ne 0 ]] && echo -e "[${red}Error${plain}] This script must be run as root!" && exit 1
 
-# 环境及程序版本控制
-mbedtlsver="mbedtls-2.13.0"
-mbedtlsurl="https://tls.mbed.org/download/mbedtls-2.13.0-gpl.tgz"
-initscripturl="https://raw.githubusercontent.com/waklim/ss-libev/master/ss_init.sh"
-
-# 获取环境及程序最新版本
-get_latest_version(){
-    ss_ver=$(wget --no-check-certificate -qO- https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases/latest | grep 'tag_name' | cut -d\" -f4)
-    [ -z ${ss_ver} ] && echo "Error: Get shadowsocks-libev latest version failed" && exit 1
-    shadowsocksver="shadowsocks-libev-$(echo ${ss_ver} | sed -e 's/^[a-zA-Z]//g')"
-    shadowsocksurl="https://github.com/shadowsocks/shadowsocks-libev/releases/download/${ss_ver}/${shadowsocksver}.tar.gz"
-    
-    libsodium_ver=$(wget --no-check-certificate -qO- https://api.github.com/repos/jedisct1/libsodium/releases/latest | grep 'tag_name' | cut -d\" -f4)
-    [ -z ${libsodium_ver} ] && echo "Error: Get libsodium latest version failed" && exit 1
-    libsodiumver="libsodium-$(echo ${libsodium_ver} | sed -e 's/^[a-zA-Z]//g')"
-    libsodiumurl="https://github.com/jedisct1/libsodium/releases/download/${libsodium_ver}/${libsodiumver}.tar.gz"
-}
-
-# 禁用 SElinux
-disable_selinux() {
-    if [ -s /etc/selinux/config ] && grep "SELINUX=enforcing" /etc/selinux/config; then
+# Disable selinux
+disable_selinux(){
+    if [ -s /etc/selinux/config ] && grep 'SELINUX=enforcing' /etc/selinux/config; then
         sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
         setenforce 0
     fi
 }
 
-# 检查当前系统类型
-check_release() {
-    local value=$1
-    local release="none"
+get_ip(){
+    local IP=$( ip addr | egrep -o '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | egrep -v "^192\.168|^172\.1[6-9]\.|^172\.2[0-9]\.|^172\.3[0-2]\.|^10\.|^127\.|^255\.|^0\." | head -n 1 )
+    [ -z ${IP} ] && IP=$( wget -qO- -t1 -T2 ipv4.icanhazip.com )
+    [ -z ${IP} ] && IP=$( wget -qO- -t1 -T2 ipinfo.io/ip )
+    [ ! -z ${IP} ] && echo ${IP} || echo
+}
 
-    if [ -f /etc/redhat-release ]; then
-        release="centos"
-    elif grep -qi "centos|red hat|redhat" /etc/issue; then
-        release="centos"
-    elif grep -qi "debian" /etc/issue; then
-        release="debian"
-    elif grep -qi "ubuntu" /etc/issue; then
-        release="ubuntu"
-    elif grep -qi "centos|red hat|redhat" /proc/version; then
-        release="centos"
-    elif grep -qi "debian" /proc/version; then
-        release="debian"
-    elif grep -qi "ubuntu" /proc/version; then
-        release="ubuntu"
-    elif grep -qi "centos|red hat|redhat" /etc/*-release; then
-        release="centos"
-    elif grep -qi "debian" /etc/*-release; then
-        release="debian"
-    elif grep -qi "ubuntu" /etc/*-release; then
-        release="ubuntu"
+get_ipv6(){
+    local ipv6=$(wget -qO- -t1 -T2 ipv6.icanhazip.com)
+    if [ -z ${ipv6} ]; then
+        return 1
+    else
+        return 0
     fi
+}
 
-    if [[ ${value} == ${release} ]]; then
+get_char(){
+    SAVEDSTTY=`stty -g`
+    stty -echo
+    stty cbreak
+    dd if=/dev/tty bs=1 count=1 2> /dev/null
+    stty -raw
+    stty echo
+    stty $SAVEDSTTY
+}
+
+get_latest_version(){
+    ver=$(wget --no-check-certificate -qO- https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases/latest | grep 'tag_name' | cut -d\" -f4)
+    [ -z ${ver} ] && echo "Error: Get shadowsocks-libev latest version failed" && exit 1
+    shadowsocks_libev_ver="shadowsocks-libev-$(echo ${ver} | sed -e 's/^[a-zA-Z]//g')"
+    download_link="https://github.com/shadowsocks/shadowsocks-libev/releases/download/${ver}/${shadowsocks_libev_ver}.tar.gz"
+    init_script_link="https://raw.githubusercontent.com/waklim/ss-libev/master/ss_init.sh"
+}
+
+check_installed(){
+    if [ "$(command -v "$1")" ]; then
         return 0
     else
         return 1
     fi
 }
 
-# 检查 Shadowsocks 状态
-check_shadowsocks_status() {
-    installedornot="not"
-    runningornot="not"
-    updateornot="not"
-    command -v ss-server > /dev/null 2>&1
+check_version(){
+    check_installed "ss-server"
     if [ $? -eq 0 ]; then
-        installedornot="installed"
-        ps -ef | grep -v "grep" | grep "ss-server" > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            runningornot="running"
+        installed_ver=$(ss-server -h | grep shadowsocks-libev | cut -d' ' -f2)
+        get_latest_version
+        latest_ver=$(echo ${ver} | sed -e 's/^[a-zA-Z]//g')
+        if [ "${latest_ver}" == "${installed_ver}" ]; then
+            return 0
+        else
+            return 1
         fi
-        local installedversion=$(ss-server -h | grep "shadowsocks-libev" | cut -d " " -f 2)
-        local latestversion=$(echo "$(wget --no-check-certificate -qO- https://api.github.com/repos/shadowsocks/shadowsocks-libev/releases/latest | grep "tag_name" | cut -d "\"" -f 4)" | sed -e 's/^[a-zA-Z]//g')
-        if [ ! -z ${latestversion} ]; then
-            if [[ ${installedversion} != ${latestversion} ]]; then
-                updateornot="update"
-                shadowsocksnewver="shadowsocks-libev-${latestversion}"
-                shadowsocksnewurl="https://github.com/shadowsocks/shadowsocks-libev/releases/download/${ver}/${shadowsocksnewver}.tar.gz"
-            fi
+    else
+        return 2
+    fi
+}
+
+print_info(){
+    clear
+    echo "Install Shadowsocks-libev server for CentOS 6 or 7"
+    echo
+}
+
+# Check system
+check_sys(){
+    local checkType=$1
+    local value=$2
+
+    local release=''
+    local systemPackage=''
+
+    if [[ -f /etc/redhat-release ]]; then
+        release="centos"
+        systemPackage="yum"
+    elif grep -Eqi "debian" /etc/issue; then
+        release="debian"
+        systemPackage="apt"
+    elif grep -Eqi "ubuntu" /etc/issue; then
+        release="ubuntu"
+        systemPackage="apt"
+    elif grep -Eqi "centos|red hat|redhat" /etc/issue; then
+        release="centos"
+        systemPackage="yum"
+    elif grep -Eqi "debian|raspbian" /proc/version; then
+        release="debian"
+        systemPackage="apt"
+    elif grep -Eqi "ubuntu" /proc/version; then
+        release="ubuntu"
+        systemPackage="apt"
+    elif grep -Eqi "centos|red hat|redhat" /proc/version; then
+        release="centos"
+        systemPackage="yum"
+    fi
+
+    if [[ "${checkType}" == "sysRelease" ]]; then
+        if [ "${value}" == "${release}" ]; then
+            return 0
+        else
+            return 1
+        fi
+    elif [[ "${checkType}" == "packageManager" ]]; then
+        if [ "${value}" == "${systemPackage}" ]; then
+            return 0
+        else
+            return 1
         fi
     fi
+}
+
+version_gt(){
+    test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"
+}
+
+check_kernel_version(){
+    local kernel_version=$(uname -r | cut -d- -f1)
+    if version_gt ${kernel_version} 3.7.0; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_kernel_headers(){
+    if check_sys packageManager yum; then
+        if rpm -qa | grep -q headers-$(uname -r); then
+            return 0
+        else
+            return 1
+        fi
+    elif check_sys packageManager apt; then
+        if dpkg -s linux-headers-$(uname -r) > /dev/null 2>&1; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    return 1
 }
 
 # Get version
@@ -113,8 +190,8 @@ getversion(){
     fi
 }
 
-# 检查 CentOS 版本
-check_centos_main_version() {
+# CentOS version
+centosversion(){
     if check_sys sysRelease centos; then
         local code=$1
         local version="$(getversion)"
@@ -129,257 +206,180 @@ check_centos_main_version() {
     fi
 }
 
-# 检查当前系统内核
-check_kernel_version() {
-    local kernelversion=$(uname -r | cut -d "-" -f 1)
-    local olderversion=$(echo "${kernelversion} 3.7.0" | tr " " "\n" | sort -V | head -n 1)
-    if [[ ${olderversion} == "3.7.0" ]]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# 检查当前系统内核头
-check_kernel_headers() {
-    local nowkernel=$(uname -r)
-    if check_release centos; then
-        rpm -qa | grep "headers-${nowkernel}" > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            return 0
-        else
-            return 1
-        fi
-    else
-        dpkg -s linux-headers-${nowkernel} > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            return 0
-        else
-            return 1
-        fi
-    fi
-}
-
-# 获取系统公网 IPv4
-get_ipv4() {
-    local ipv4=$(ip addr | grep -Eo "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" | grep -Ev "^192\.168|^172\.1[6-9]\.|^172\.2[0-9]\.|^172\.3[0-2]\.|^10\.|^127\.|^255\.|^0\." | head -n 1)
-    if [ -z ${ipv4} ]; then
-        ipv4=$(wget -qO- -t 1 -T 10 ipv4.icanhazip.com)
-    fi
-    if [ -z ${ipv4} ]; then
-        ipv4=$(wget -qO- -t 1 -T 10 ipinfo.io/ip)
-    fi
-    echo -e "${ipv4}"
-}
-
-# 检查系统公网 IPv6
-check_ipv6() {
-    local ipv6=$(wget -qO- -t 1 -T 10 ipv6.icanhazip.com)
-    if [ -z ${ipv6} ]; then
-        return 1
-    else
-        return 0
-    fi
-}
-
-# 设置 Shadowsocks 连接信息
-set_shadowsocks_config() {
-    clear
-    echo -e "${green}[提示]${plain} 开始配置 Shadowsocks 连接信息"
-    echo -e "${green}[提示]${plain} 不清楚的地方，直接回车采用默认配置即可"
-    echo ""
-    echo "请设置 Shadowsocks 的连接密码"
-    read -p "[默认为 Shadowsocks]：" sspassword
-    if [ -z ${sspassword} ]; then
-        sspassword="Shadowsocks"
-    fi
-    echo "-------------------------------"
-    echo "连接密码已设置为：${sspassword}"
-    echo "-------------------------------"
-
-    local defaultport=$(shuf -i 9000-9999 -n 1)
-    echo "请设置 Shadowsocks 连接端口（1~65535）"
-    while true
-    do
-        read -p "[默认为 ${defaultport}]：" ssport
-        if [ -z ${ssport} ]; then
-            ssport=${defaultport}
-        fi
-        expr ${ssport} + 1 > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            if [ ${ssport} -ge 1 ] && [ ${ssport} -le 65535 ]; then
-                echo "-------------------------------"
-                echo "连接端口已设置为：${ssport}"
-                echo "-------------------------------"
-                break
-            else
-                echo -e "${red}[错误]${plain} 请输入 1 和 65535 之间的数字！"
-            fi
-        else
-            echo -e "${red}[错误]${plain} 请输入 1 和 65535 之间的数字！"
-        fi
-    done
-
-    echo "请设置 Shadowsocks 的加密方式"
-    for ((i=1;i<=${#ciphers[@]};i++));
-    do
-        local cipher=${ciphers[$i-1]}
-        echo -e "${i}) ${cipher}"
-    done
-    while true
-    do
-        read -p "[默认为 ${ciphers[0]}]：" ciphernumber
-        if [ -z ${ciphernumber} ]; then
-            ciphernumber="1"
-        fi
-        expr ${ciphernumber} + 1 > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            if [ ${ciphernumber} -ge 1 ] && [ ${ciphernumber} -le ${#ciphers[@]} ]; then
-                sscipher=${ciphers[${ciphernumber}-1]}
-                echo "-------------------------------"
-                echo "加密方式已设置为：${sscipher}"
-                echo "-------------------------------"
-                break
-            else
-                echo -e "${red}[错误]${plain} 请输入 1 和 ${#ciphers[@]} 之间的数字！"
-            fi
-        else
-            echo -e "${red}[错误]${plain} 请输入 1 和 ${#ciphers[@]} 之间的数字！"
-        fi
-    done
-
-    echo ""
-    echo "按回车键开始安装...或按 Ctrl+C 键取消"
-    read -n 1
-}
-
-# 安装依赖
-install_dependencies() {
-    if check_release centos; then
-        if [ ! -f /etc/yum.repos.d/epel.repo ]; then
-            yum install -y epel-release
-            if [ $? -ne 0 ]; then
-                echo -e "${red}[错误]${plain} EPEL 更新源安装失败，请稍后重试！"
-                exit 1
-            fi
-        fi
-        command -v yum-config-manager > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-            yum install -y yum-utils
-        fi
-        local epelstatus=$(yum-config-manager epel | grep -w "enabled" | cut -d " " -f 3)
-        if [[ ${epelstatus} != "True" ]]; then
-            yum-config-manager --enable epel
-        fi
-        yum install -y unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto libev-devel pcre pcre-devel git c-ares-devel
-        if [ $? -ne 0 ]; then
-            echo -e "${red}[错误]${plain} 依赖安装失败，请稍后重试！"
+# Pre-installation settings
+pre_install(){
+    # Check OS system
+    if check_sys sysRelease centos; then
+        # Not support CentOS 5
+        if centosversion 5; then
+            echo -e "[${red}Error${plain}] Not support CentOS 5, please change to CentOS 6 or 7 and try again."
             exit 1
         fi
     else
-        apt-get update
-        apt-get install --no-install-recommends -y gettext build-essential autoconf automake libtool openssl libssl-dev zlib1g-dev libpcre3-dev libev-dev libc-ares-dev
-        if [ $? -ne 0 ]; then
-            echo -e "${red}[错误]${plain} 依赖安装失败，请稍后重试！"
-            exit 1
+        echo -e "[${red}Error${plain}] Your OS is not supported to run it, please change OS to CentOS and try again."
+        exit 1
+    fi
+
+    # Check version
+    check_version
+    status=$?
+    if [ ${status} -eq 0 ]; then
+        echo -e "[${green}Info${plain}] Latest version ${green}${shadowsocks_libev_ver}${plain} has already been installed, nothing to do..."
+        exit 0
+    elif [ ${status} -eq 1 ]; then
+        echo -e "Installed version: ${red}${installed_ver}${plain}"
+        echo -e "Latest version: ${red}${latest_ver}${plain}"
+        echo -e "[${green}Info${plain}] Upgrade shadowsocks libev to latest version..."
+        ps -ef | grep -v grep | grep -i "ss-server" > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            /etc/init.d/shadowsocks stop
+        fi
+    elif [ ${status} -eq 2 ]; then
+        print_info
+        get_latest_version
+        echo -e "[${green}Info${plain}] Latest version: ${green}${shadowsocks_libev_ver}${plain}"
+        echo
+    fi
+
+    # Set shadowsocks-libev config password
+    echo "Please enter password for shadowsocks-libev:"
+    read -p "(Default password: Shadowsocks):" shadowsockspwd
+    [ -z "${shadowsockspwd}" ] && shadowsockspwd="Shadowsocks"
+    echo
+    echo "---------------------------"
+    echo "password = ${shadowsockspwd}"
+    echo "---------------------------"
+    echo
+
+    # Set shadowsocks-libev config port
+    while true
+    do
+    dport=$(shuf -i 9000-19999 -n 1)
+    echo -e "Please enter a port for shadowsocks-libev [1-65535]"
+    read -p "(Default port: ${dport}):" shadowsocksport
+    [ -z "$shadowsocksport" ] && shadowsocksport=${dport}
+    expr ${shadowsocksport} + 1 &>/dev/null
+    if [ $? -eq 0 ]; then
+        if [ ${shadowsocksport} -ge 1 ] && [ ${shadowsocksport} -le 65535 ] && [ ${shadowsocksport:0:1} != 0 ]; then
+            echo
+            echo "---------------------------"
+            echo "port = ${shadowsocksport}"
+            echo "---------------------------"
+            echo
+            break
         fi
     fi
-    echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
-}
+    echo -e "[${red}Error${plain}] Please enter a correct number [1-65535]"
+    done
 
-# 设置防火墙
-set_firewall() {
-    if check_release centos; then
-        if check_centos_main_version 6; then
-            /etc/init.d/iptables status > /dev/null 2>&1
-            if [ $? -eq 0 ]; then
-                iptables -L -n | grep "${ssport}" > /dev/null 2>&1
-                if [ $? -ne 0 ]; then
-                    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${ssport} -j ACCEPT
-                    iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${ssport} -j ACCEPT
-                    /etc/init.d/iptables save
-                    /etc/init.d/iptables restart
-                fi
-            fi
-        elif check_centos_main_version 7; then
-            systemctl status firewalld > /dev/null 2>&1
-            if [ $? -eq 0 ]; then
-                firewall-cmd --query-port=${ssport}/tcp > /dev/null 2>&1
-                if [ $? -ne 0 ]; then
-                    firewall-cmd --permanent --zone=public --add-port=${ssport}/tcp
-                    firewall-cmd --permanent --zone=public --add-port=${ssport}/udp
-                    firewall-cmd --reload
-                fi
-            fi
-        fi
+    # Set shadowsocks config stream ciphers
+    while true
+    do
+    echo -e "Please select stream cipher for shadowsocks-libev:"
+    for ((i=1;i<=${#ciphers[@]};i++ )); do
+        hint="${ciphers[$i-1]}"
+        echo -e "${green}${i}${plain}) ${hint}"
+    done
+    read -p "Which cipher you'd select(Default: ${ciphers[0]}):" pick
+    [ -z "$pick" ] && pick=1
+    expr ${pick} + 1 &>/dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "[${red}Error${plain}] Please enter a number"
+        continue
     fi
+    if [[ "$pick" -lt 1 || "$pick" -gt ${#ciphers[@]} ]]; then
+        echo -e "[${red}Error${plain}] Please enter a number between 1 and ${#ciphers[@]}"
+        continue
+    fi
+    shadowsockscipher=${ciphers[$pick-1]}
+    echo
+    echo "---------------------------"
+    echo "cipher = ${shadowsockscipher}"
+    echo "---------------------------"
+    echo
+    break
+    done
+
+    echo
+    echo "Press any key to start...or press Ctrl+C to cancel"
+    char=`get_char`
+    #Install necessary dependencies
+    echo -e "[${green}Info${plain}] Checking the EPEL repository..."
+    if [ ! -f /etc/yum.repos.d/epel.repo ]; then
+        yum install -y -q epel-release
+    fi
+    [ ! -f /etc/yum.repos.d/epel.repo ] && echo -e "[${red}Error${plain}] Install EPEL repository failed, please check it." && exit 1
+    [ ! "$(command -v yum-config-manager)" ] && yum install -y -q yum-utils
+    if [ x"`yum-config-manager epel | grep -w enabled | awk '{print $3}'`" != x"True" ]; then
+        yum-config-manager --enable epel
+    fi
+    echo -e "[${green}Info${plain}] Checking the EPEL repository complete..."
+    yum install -y -q unzip openssl openssl-devel gettext gcc autoconf libtool automake make asciidoc xmlto libev-devel pcre pcre-devel git c-ares-devel
 }
 
-# 下载函数
 download() {
-    local filename=$1
-
+    local filename=${1}
+    local cur_dir=`pwd`
     if [ -s ${filename} ]; then
-        echo -e "${green}[提示]${plain} ${filename} 已下载"
+        echo -e "[${green}Info${plain}] ${filename} [found]"
     else
-        echo -e "${green}[提示]${plain} ${filename} 未找到，开始下载"
-        wget --no-check-certificate -c -t 3 -T 60 -O $1 $2
+        echo -e "[${green}Info${plain}] ${filename} not found, download now..."
+        wget --no-check-certificate -cq -t3 -T60 -O ${1} ${2}
         if [ $? -eq 0 ]; then
-            echo -e "${green}[提示]${plain} ${filename} 下载完成"
+            echo -e "[${green}Info${plain}] ${filename} download completed..."
         else
-            echo -e "${red}[错误]${plain} ${filename} 下载失败，请稍后重试！"
+            echo -e "[${red}Error${plain}] Failed to download ${filename}, please download it to ${cur_dir} directory manually and try again."
             exit 1
         fi
     fi
 }
 
-# 安装libsodium
+# Download latest shadowsocks-libev
+download_files(){
+    cd ${cur_dir}
+
+    download "${shadowsocks_libev_ver}.tar.gz" "${download_link}"
+    download "${libsodium_file}.tar.gz" "${libsodium_url}"
+    download "${mbedtls_file}-gpl.tgz" "${mbedtls_url}"
+    download "/etc/init.d/shadowsocks" "${init_script_link}"
+}
+
 install_libsodium() {
-    cd ${currentdir}
     if [ ! -f /usr/lib/libsodium.a ]; then
-        download "${libsodiumver}.tar.gz" "${libsodiumurl}"
-        tar zxf ${libsodiumver}.tar.gz
-        cd ${libsodiumver}
+        cd ${cur_dir}
+        tar zxf ${libsodium_file}.tar.gz
+        cd ${libsodium_file}
         ./configure --prefix=/usr && make && make install
         if [ $? -ne 0 ]; then
-            echo -e "${red}[错误]${plain} ${libsodiumver} 安装失败，请稍后重试！"
+            echo -e "[${red}Error${plain}] ${libsodium_file} install failed."
             exit 1
         fi
     else
-        echo -e "${green}[提示]${plain} ${libsodiumver} 已安装"
+        echo -e "[${green}Info${plain}] ${libsodium_file} already installed."
     fi
-
-    cd ${currentdir}
-    rm -rf ${libsodiumver} ${libsodiumver}.tar.gz
 }
 
-# 安装mbedtls
 install_mbedtls() {
-    cd ${currentdir}
     if [ ! -f /usr/lib/libmbedtls.a ]; then
-        download "${mbedtlsver}-gpl.tgz" "${mbedtlsurl}"
-        tar xf ${mbedtlsver}-gpl.tgz
-        cd ${mbedtlsver}
+        cd ${cur_dir}
+        tar xf ${mbedtls_file}-gpl.tgz
+        cd ${mbedtls_file}
         make SHARED=1 CFLAGS=-fPIC
         make DESTDIR=/usr install
         if [ $? -ne 0 ]; then
-            echo -e "${red}[错误]${plain} ${mbedtlsver} 安装失败，请稍后重试！"
+            echo -e "[${red}Error${plain}] ${mbedtls_file} install failed."
             exit 1
         fi
     else
-        echo -e "${green}[提示]${plain} ${mbedtlsver} 已安装"
+        echo -e "[${green}Info${plain}] ${mbedtls_file} already installed."
     fi
-
-    cd ${currentdir}
-    rm -rf ${mbedtlsver} ${mbedtlsver}-gpl.tgz
 }
 
-# 创建shadowsocks配置文件
-config_shadowsocks() {
-    if check_ipv6; then
+# Config shadowsocks
+config_shadowsocks(){
+    local server_value="\"0.0.0.0\""
+    if get_ipv6; then
         server_value="[\"[::0]\",\"0.0.0.0\"]"
-    else
-        server_value="\"0.0.0.0\""
     fi
 
     if check_kernel_version && check_kernel_headers; then
@@ -391,15 +391,14 @@ config_shadowsocks() {
     if [ ! -d /etc/shadowsocks-libev ]; then
         mkdir -p /etc/shadowsocks-libev
     fi
-
-    cat > /etc/shadowsocks-libev/config.json << EOF
+    cat > /etc/shadowsocks-libev/config.json<<-EOF
 {
     "server":${server_value},
-    "server_port":${ssport},
-    "password":"${sspassword}",
+    "server_port":${shadowsocksport},
+    "password":"${shadowsockspwd}",
     "timeout":300,
     "user":"nobody",
-    "method":"${sscipher}",
+    "method":"${shadowsockscipher}",
     "fast_open":${fast_open},
     "nameserver":"8.8.8.8",
     "mode":"tcp_and_udp"
@@ -407,253 +406,158 @@ config_shadowsocks() {
 EOF
 }
 
-# 安装shadowsocks
-install_shadowsocks() {
-    ldconfig
-    cd ${currentdir}
-    if [[ ${updateornot} == "not" ]]; then
-        download "${shadowsocksver}.tar.gz" "${shadowsocksurl}"
-    else
-        download "${shadowsocksnewver}.tar.gz" "${shadowsocksnewurl}"
+# Firewall set
+firewall_set(){
+    echo -e "[${green}Info${plain}] firewall set start..."
+    if centosversion 6; then
+        /etc/init.d/iptables status > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            iptables -L -n | grep -i ${shadowsocksport} > /dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${shadowsocksport} -j ACCEPT
+                iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${shadowsocksport} -j ACCEPT
+                /etc/init.d/iptables save
+                /etc/init.d/iptables restart
+            else
+                echo -e "[${green}Info${plain}] port ${shadowsocksport} has been set up."
+            fi
+        else
+            echo -e "[${yellow}Warning${plain}] iptables looks like shutdown or not installed, please manually set it if necessary."
+        fi
+    elif centosversion 7; then
+        systemctl status firewalld > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            firewall-cmd --permanent --zone=public --add-port=${shadowsocksport}/tcp
+            firewall-cmd --permanent --zone=public --add-port=${shadowsocksport}/udp
+            firewall-cmd --reload
+        else
+            echo -e "[${yellow}Warning${plain}] firewalld looks like not running or not installed, please enable port ${shadowsocksport} manually if necessary."
+        fi
     fi
-    tar zxf ${shadowsocksver}.tar.gz
-    cd ${shadowsocksver}
-    ./configure --disable-documentation
-    make && make install
-    if [ $? -ne 0 ]; then
-        echo -e "${red}[错误]${plain} Shadowsocks 安装失败，请稍后重试！"
-        exit 1
-    fi
-    if [ ! -f /etc/init.d/shadowsocks ]; then
-        download "/etc/init.d/shadowsocks" "${initscripturl}"
-    fi
-    chmod +x /etc/init.d/shadowsocks
-    /etc/init.d/shadowsocks start
-    if [ $? -ne 0 ]; then
-        echo -e "${red}[错误]${plain} Shadowsocks 启动失败，请稍后重试！"
-        exit 1
-    fi
-    if check_release centos; then
-        chkconfig --add shadowsocks
-        chkconfig shadowsocks on
-    else
-        update-rc.d -f shadowsocks defaults
-    fi
-
-    cd ${currentdir}
-    rm -rf ${shadowsocksver} ${shadowsocksver}.tar.gz
+    echo -e "[${green}Info${plain}] firewall set completed..."
 }
 
-# 卸载shadowsocks
-uninstall_shadowsocks() {
-    ps -ef | grep -v "grep" | grep "ss-server" > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        /etc/init.d/shadowsocks stop
-    fi
-    if check_release centos; then
-        chkconfig --del shadowsocks
-    else
-        update-rc.d -f shadowsocks remove
-    fi
-    rm -rf /etc/shadowsocks-libev
-    rm -f /usr/local/bin/ss-local
-    rm -f /usr/local/bin/ss-tunnel
-    rm -f /usr/local/bin/ss-server
-    rm -f /usr/local/bin/ss-manager
-    rm -f /usr/local/bin/ss-redir
-    rm -f /usr/local/bin/ss-nat
-    rm -f /usr/local/lib/libshadowsocks-libev.a
-    rm -f /usr/local/lib/libshadowsocks-libev.la
-    rm -f /usr/local/include/shadowsocks.h
-    rm -f /usr/local/lib/pkgconfig/shadowsocks-libev.pc
-    rm -f /usr/local/share/man/man1/ss-local.1
-    rm -f /usr/local/share/man/man1/ss-tunnel.1
-    rm -f /usr/local/share/man/man1/ss-server.1
-    rm -f /usr/local/share/man/man1/ss-manager.1
-    rm -f /usr/local/share/man/man1/ss-redir.1
-    rm -f /usr/local/share/man/man1/ss-nat.1
-    rm -f /usr/local/share/man/man8/shadowsocks-libev.8
-    rm -rf /usr/local/share/doc/shadowsocks-libev
-    rm -f /etc/init.d/shadowsocks
-    rm -f /root/shadowsocks.txt
-}
-
-# 安装完成信息
-install_success() {
-    local ssurl=$(echo -n "${sscipher}:${sspassword}@$(get_ipv4):${ssport}" | base64 -w0)
-    clear
-    echo -e "${green}[提示]${plain} Shadowsocks 安装成功，配置信息为"
-    echo -e "==============================================="
-    echo -e "服务器地址  : \033[41;37m $(get_ipv4) \033[0m"
-    echo -e "服务端口    : \033[41;37m ${ssport} \033[0m"
-    echo -e "连接密码    : \033[41;37m ${sspassword} \033[0m"
-    echo -e "加密方式    : \033[41;37m ${sscipher} \033[0m"
-    echo -e "-----------------------------------------------"
-    echo -e "ss://${ssurl}"
-    echo -e "==============================================="
-
-    cat > /root/shadowsocks.txt << EOF
-===============================================
-服务器地址  : $(get_ipv4)
-服务端口    : ${ssport}
-连接密码    : ${sspassword}
-加密方式    : ${sscipher}
------------------------------------------------
-ss://${ssurl}
-===============================================
-EOF
-    echo -e "配置信息已备份在 /root/shadowsocks.txt 文件内"
-}
-
-# 安装
-install_main() {
-    get_latest_version
-    disable_selinux
-    set_shadowsocks_config
-    install_dependencies
-    set_firewall
+# Install Shadowsocks-libev
+install_shadowsocks(){
     install_libsodium
     install_mbedtls
-    config_shadowsocks
-    install_shadowsocks
-    install_success
-}
 
-# 卸载
-uninstall_main() {
-    uninstall_shadowsocks
-    echo -e "${green}[提示]${plain} Shadowsocks 已成功卸载"
-}
-
-# 更新
-update_main() {
-    if [[ ${updateornot} == "update" ]]; then
-        ps -ef | grep -v grep | grep -i "ss-server" > /dev/null 2>&1
-        [ $? -eq 0 ] && /etc/init.d/shadowsocks stop
-        install_shadowsocks
-        echo -e "${green}[提示]${plain} Shadowsocks 更新成功"
-    else
-        echo -e "${green}[提示]${plain} Shadowsocks 已安装最新版，无需更新"
-    fi
-}
-
-# 启动
-start_main() {
-    /etc/init.d/shadowsocks start
+    ldconfig
+    cd ${cur_dir}
+    tar zxf ${shadowsocks_libev_ver}.tar.gz
+    cd ${shadowsocks_libev_ver}
+    ./configure --disable-documentation
+    make && make install
     if [ $? -eq 0 ]; then
-        echo -e "${green}[提示]${plain} Shadowsocks 启动成功"
-    else
-        echo -e "${red}[错误]${plain} Shadowsocks 启动失败，请稍后重试！"
-    fi
-}
-
-# 停止
-stop_main() {
-    /etc/init.d/shadowsocks stop
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[提示]${plain} Shadowsocks 停止成功"
-    else
-        echo -e "${red}[错误]${plain} Shadowsocks 停止失败，请稍后重试！"
-    fi
-}
-
-# 重启
-restart_main() {
-    /etc/init.d/shadowsocks stop
-    /etc/init.d/shadowsocks start
-    if [ $? -eq 0 ]; then
-        echo -e "${green}[提示]${plain} Shadowsocks 重启成功"
-    else
-        echo -e "${red}[错误]${plain} Shadowsocks 重启失败，请稍后重试！"
-    fi
-}
-
-# 查看配置
-status_main() {
-    echo -e "${green}[提示]${plain} 当前 Shadowsocks 配置信息为"
-    cat /root/shadowsocks.txt
-    echo "此信息仅供参考，具体请查看 Shadowsocks 配置文件"
-}
-
-# 修改配置
-modify_main() {
-    set_shadowsocks_config
-    /etc/init.d/shadowsocks stop
-    set_firewall
-    config_shadowsocks
-    /etc/init.d/shadowsocks start
-    install_success
-    echo ""
-    echo "若修改后无法生效，请尝试重启解决！"
-}
-
-# 起始界面
-if check_release centos || check_release debian || check_release ubuntu; then
-    clear
-    echo "=================================="
-    echo " Shadowsocks 一键管理脚本（libev）"
-    echo "=================================="
-    echo " 1.安装 Shadowsocks 服务"
-    echo " 2.卸载 Shadowsocks 服务"
-    echo " 3.更新 Shadowsocks 服务"
-    echo "----------------------------------"
-    echo " 4.启动 Shadowsocks 服务"
-    echo " 5.停止 Shadowsocks 服务"
-    echo " 6.重启 Shadowsocks 服务"
-    echo "----------------------------------"
-    echo " 7.查看 Shadowsocks 配置"
-    echo " 8.修改 Shadowsocks 配置"
-    echo "=================================="
-
-    check_shadowsocks_status
-    if [[ ${installedornot} == "installed" ]]; then
-        if [[ ${runningornot} == "running" ]]; then
-            if [[ ${updateornot} == "not" ]]; then
-                echo -e "${green}已安装且正在运行${plain}"
-            else
-                echo -e "${green}已安装且正在运行，版本可更新${plain}"
-            fi
-        else
-            echo -e "${yellow}已安装但未运行${plain}"
-        fi
-    else
-        echo -e "${red}尚未安装${plain}"
-    fi
-
-    while true
-    do
-        echo ""
-        read -p "请输入相应功能前面的数字：" choice
-        [[ -z ${choice} ]] && choice="0"
-        expr ${choice} + 1 > /dev/null 2>&1
+        chmod +x /etc/init.d/shadowsocks
+        chkconfig --add shadowsocks
+        chkconfig shadowsocks on
+        # Start shadowsocks
+        /etc/init.d/shadowsocks start
         if [ $? -eq 0 ]; then
-            if [ ${choice} -ge 1 ] && [ ${choice} -le 8 ]; then
-                if [ "${choice}" == "1" ]; then
-                    install_main
-                elif [ "${choice}" == "2" ]; then
-                    uninstall_main
-                elif [ "${choice}" == "3" ]; then
-                    update_main
-                elif [ "${choice}" == "4" ]; then
-                    start_main
-                elif [ "${choice}" == "5" ]; then
-                    stop_main
-                elif [ "${choice}" == "6" ]; then
-                    restart_main
-                elif [ "${choice}" == "7" ]; then
-                    status_main
-                elif [ "${choice}" == "8" ]; then
-                    modify_main
-                fi
-                break
-            else
-                echo -e "${red}[错误]${plain} 请输入 1 和 8 之间的数字！"
-            fi
+            echo -e "[${green}Info${plain}] Shadowsocks-libev start success!"
         else
-            echo -e "${red}[错误]${plain} 请输入 1 和 8 之间的数字！"
+            echo -e "[${yellow}Warning${plain}] Shadowsocks-libev start failure!"
         fi
-    done
-else
-    echo -e "${red}[错误]${plain} 本脚本只支持 CentOS、Debian 及 Ubuntu 系统！"
-    exit 1
+    else
+        echo
+        echo -e "[${red}Error${plain}] Shadowsocks-libev install failed. "
+        exit 1
+    fi
+
+    cd ${cur_dir}
+    rm -rf ${shadowsocks_libev_ver} ${shadowsocks_libev_ver}.tar.gz
+    rm -rf ${libsodium_file} ${libsodium_file}.tar.gz
+    rm -rf ${mbedtls_file} ${mbedtls_file}-gpl.tgz
+
+    shadowsocksurl=$(echo -n "${shadowsockscipher}:${shadowsockspwd}@$(get_ip):${shadowsocksport}" | base64 -w0)
+    clear
+    echo
+    echo -e "Your Server IP        : \033[41;37m $(get_ip) \033[0m"
+    echo -e "Your Server Port      : \033[41;37m ${shadowsocksport} \033[0m"
+    echo -e "Your Password         : \033[41;37m ${shadowsockspwd} \033[0m"
+    echo -e "Your Encryption Method: \033[41;37m ${shadowsockscipher} \033[0m"
+    echo -e "Quick Link            : \033[41;37m ss://${shadowsocksurl} \033[0m"
+    echo
+    
+    cat > /root/shadowsocks.txt << EOF
+===============================================
+Your Server IP        : $(get_ip)
+Your Server Port      : ${shadowsocksport}
+Your Password         : ${shadowsockspwd}
+Your Encryption Method: ${shadowsockscipher}
+-----------------------------------------------
+Quick Link            : ss://${shadowsocksurl}
+===============================================
+EOF
+    echo -e "Configuration information has been backed up at /root/shadowsocks.txt"
+}
+
+# Install Shadowsocks-libev
+install_shadowsocks_libev(){
+    disable_selinux
+    pre_install
+    download_files
+    config_shadowsocks
+    firewall_set
+    install_shadowsocks
+}
+
+# Uninstall Shadowsocks-libev
+uninstall_shadowsocks_libev(){
+    clear
+    print_info
+    printf "Are you sure uninstall Shadowsocks-libev? (y/n)"
+    printf "\n"
+    read -p "(Default: y):" answer
+    [ -z ${answer} ] && answer="y"
+
+    if [ "${answer}" == "y" ] || [ "${answer}" == "Y" ]; then
+        ps -ef | grep -v grep | grep -i "ss-server" > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            /etc/init.d/shadowsocks stop
+        fi
+        chkconfig --del shadowsocks
+        rm -fr /etc/shadowsocks-libev
+        rm -f /usr/local/bin/ss-local
+        rm -f /usr/local/bin/ss-tunnel
+        rm -f /usr/local/bin/ss-server
+        rm -f /usr/local/bin/ss-manager
+        rm -f /usr/local/bin/ss-redir
+        rm -f /usr/local/bin/ss-nat
+        rm -f /usr/local/lib/libshadowsocks-libev.a
+        rm -f /usr/local/lib/libshadowsocks-libev.la
+        rm -f /usr/local/include/shadowsocks.h
+        rm -f /usr/local/lib/pkgconfig/shadowsocks-libev.pc
+        rm -f /usr/local/share/man/man1/ss-local.1
+        rm -f /usr/local/share/man/man1/ss-tunnel.1
+        rm -f /usr/local/share/man/man1/ss-server.1
+        rm -f /usr/local/share/man/man1/ss-manager.1
+        rm -f /usr/local/share/man/man1/ss-redir.1
+        rm -f /usr/local/share/man/man1/ss-nat.1
+        rm -f /usr/local/share/man/man8/shadowsocks-libev.8
+        rm -fr /usr/local/share/doc/shadowsocks-libev
+        rm -f /etc/init.d/shadowsocks
+        echo "Shadowsocks-libev uninstall success!"
+    else
+        echo
+        echo "uninstall cancelled, nothing to do..."
+        echo
+    fi
+}
+
+# Initialization step
+echo " 1.install/update Shadowsocks"
+echo " 2.uninstall Shadowsocks"
+read -p "please input number：" action
+[[ -z ${action} ]] && action="0"
+expr ${action} + 1 > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    if [ ${action} -ge 1 ] && [ ${action} -le 2 ]; then
+        if [ "${action}" == "1" ]; then
+            install_shadowsocks_libev
+        elif [ "${action}" == "2" ]; then
+            uninstall_shadowsocks_libev
+        fi
+    fi
 fi
