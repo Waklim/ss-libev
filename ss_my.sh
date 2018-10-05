@@ -545,19 +545,61 @@ uninstall_shadowsocks_libev(){
         echo
     fi
 }
+# Start Shadowsocks-libev
+start_shadowsocks_libev() {
+    /etc/init.d/shadowsocks start
+    if [ $? -eq 0 ]; then
+        echo -e "${green}[info]${plain} Shadowsocks start success"
+    else
+        echo -e "${red}[error]${plain} Shadowsocks start failed, please try again."
+    fi
+}
+
+# Stop Shadowsocks-libev
+stop_shadowsocks_libev() {
+    /etc/init.d/shadowsocks stop
+    if [ $? -eq 0 ]; then
+        echo -e "${green}[info]${plain} Shadowsocks stop success"
+    else
+        echo -e "${red}[error]${plain} Shadowsocks stop failed, please try again."
+    fi
+}
+
+# Restart Shadowsocks-libev
+restart_shadowsocks_libev() {
+    /etc/init.d/shadowsocks stop
+    /etc/init.d/shadowsocks start
+    if [ $? -eq 0 ]; then
+        echo -e "${green}[info]${plain} Shadowsocks restart success"
+    else
+        echo -e "${red}[error]${plain} Shadowsocks restart failed, please try again."
+    fi
+}
 
 # Initialization step
-echo " 1.install/update Shadowsocks"
-echo " 2.uninstall Shadowsocks"
+echo " 1. Install/Update Shadowsocks"
+echo " 2. Uninstall Shadowsocks"
+echo " 3. Start Shadowsocks"
+echo " 4. Stop Shadowsocks"
+echo " 5. Restart Shadowsocks"
 read -p "please input number：" action
 [[ -z ${action} ]] && action="0"
 expr ${action} + 1 > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    if [ ${action} -ge 1 ] && [ ${action} -le 2 ]; then
+    if [ ${action} -ge 1 ] && [ ${action} -le 5 ]; then
         if [ "${action}" == "1" ]; then
             install_shadowsocks_libev
         elif [ "${action}" == "2" ]; then
             uninstall_shadowsocks_libev
+        elif [ "${action}" == "3" ]; then
+            start_shadowsocks_libev
+        elif [ "${action}" == "4" ]; then
+            stop_shadowsocks_libev
+        elif [ "${action}" == "5" ]; then
+            restart_shadowsocks_libev
         fi
+        break
+    else
+        echo -e "${red}[error]${plain} please input number between 1 and 5 !"
     fi
 fi
